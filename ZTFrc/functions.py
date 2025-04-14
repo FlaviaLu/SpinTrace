@@ -1,4 +1,4 @@
-import pyedra
+import pyedra, re, glob, os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -41,6 +41,45 @@ def delta_string(mag_delta):
         else:
             resultant_string += character
     return resultant_string
+############################################################################
+def download_fits_tables(obj_name, path=None):
+    '''
+    This function is designated to build the links from the csv metadata table and download the PSF measurements from PSF database. 
+    The files comes as tables in FITS format and might be large if you are targeting an object in the a crowded by stars FoV.
+
+    Parameters
+    ----------
+
+    obj_name: str, list
+    It is the target name.
+
+    path: str
+    Complete path to save the fits tables. 
+    Default=current path.
+
+    Return
+    ------
+    When the download is completed, it prints DONE on the screen. 
+    
+    '''
+    if path==None:
+        current_path=os.getcwd()
+    else:
+        current_path=path
+    filelist=sorted(glob.glob("input_files/*"+obj_name+"*.csv"))
+    file=filelist[0]
+    print('User choose to download data from ZTF using '+file+' to build the links\n')
+    if not os.path.exists(obj_name+'/fits_tables/'): 
+        os.makedirs(obj_name+'/fits_tables/')
+    ####
+    print('****************DOWNLOADING FITS tables from ZTF database**********************************')
+    data = pd.read_csv(file)
+    PATH = current_path+'/'+obj_name+'/fits_tables/'
+    build_download_links(data, PATH)
+    get_ipython().system('source psfcat_links_to_download.sh') 
+    os.remove('psfcat_links_to_download.sh')
+    print('DONE')  
+    print('-------------------------------------------------------------')
 ############################################################################
 def dict_to_csv_file(list_of_variables):
     dd = {
@@ -183,6 +222,9 @@ def get_ephemeris_horizons(target,start_date,end_date,step='4h',id_type='smallbo
     The type of information you provided for id parameter according to astroquery.jplhorizons documentation.
     Default: 'smallbody'
     '''
+    if re.match(r'^\d{4}', target):
+        target = target[:4] + ' ' + target[4:]
+        
     obj = Horizons(id=target, location='I41',epochs={'start': start_date,'stop': end_date,'step': step},id_type=id_type)
     ephem=obj.ephemerides(extra_precision=True)
     return ephem
@@ -302,8 +344,8 @@ def lomb_scargle_fit(asteroid,z_filter,df,corrected_mag,path,n_term=1,f_min=0.5,
     P_dec: int
     The number of decimals to be presented in the plots (default=5).
     '''
-    FSS = 20
-    fig_width=8
+    FSS = 18
+    fig_width=12
     fig_height=4
     #
     JD = df['Date_corrected (JD)']
@@ -317,25 +359,22 @@ def lomb_scargle_fit(asteroid,z_filter,df,corrected_mag,path,n_term=1,f_min=0.5,
     plt.xlabel('Frequency (cycles/day)',fontsize=FSS)
     plt.ylabel('Power LS',fontsize=FSS)
     plt.axvline((24/P_ref),color='k',linestyle=':',lw=2,label='Publ = '+str(P_ref)+' h')
-    plt.plot(best_freq,potencia.max(),'ro',label='Peak = {:.2f} h'.format(24/best_freq))
+    plt.plot(best_freq,potencia.max(),'ro',label='Peak = {:.6f} h'.format(24/best_freq))
     if n_term == 1:
         probabilities = [0.001]
         false_alarm = ls.false_alarm_level(probabilities)
         plt.plot([frequencia.min(), frequencia.max()],[false_alarm, false_alarm], 'r--', label='99% confidence')
     plt.xticks(fontsize=FSS)
     plt.yticks(fontsize=FSS)
-    plt.legend(fontsize=FSS-5,loc='upper left')# , bbox_to_anchor=(1, 1)
+    plt.legend(fontsize=FSS-5,loc='upper left', bbox_to_anchor=(1, 1))
     plt.tight_layout()
-    if shev=='yes':
-        plt.savefig(path+asteroid+'_'+z_filter+'_'+str(year)+'_term'+str(n_term)+'_periodogram_Shevchenko.jpg',format='jpg')
-    else:
-        plt.savefig(path+asteroid+'_'+z_filter+'_'+str(year)+'_term'+str(n_term)+'_periodogram.jpg',format='jpg')
+    plt.savefig(path+asteroid+'_'+z_filter+'_'+str(year)+'_term'+str(n_term)+'_periodogram.jpg',format='jpg')
     plt.close()
     #####
     # lets create a variable name 'fase_orbital' with 2 times de period find before
     fase = (JD*best_freq) % 1
     fase_orbital, mag_orbital = np.concatenate([fase,fase+0]), np.concatenate([corrected_mag,corrected_mag])
-    t_fit = np.linspace(0, 1/best_freq, 1000)
+    t_fit = np.linspace(0, 2/best_freq, 1000)
     y_fit = ls.model(t_fit, best_freq)
     phase_fit = (t_fit*best_freq) % 1
     model = ls.model(JD, best_freq)
@@ -347,10 +386,10 @@ def lomb_scargle_fit(asteroid,z_filter,df,corrected_mag,path,n_term=1,f_min=0.5,
     plt.title(asteroid+' - '+z_filter+' - '+str(year)+' - '+str(len(df))+' points - P ='+str(P)+' hours',fontsize=FSS)
     plt.plot(fase_orbital, mag_orbital, '.')
     plt.plot((t_fit*best_freq) % 1, y_fit, 'r.', label='LS best model')
-    plt.xlabel('Frequency (cicles/day)',fontsize=FSS)
+    plt.xlabel('Rotational phase',fontsize=FSS)
     plt.ylabel('Mag',fontsize=FSS)
-    plt.annotate('std = {:.2f} mag'.format(std),(0.7,0.9),xycoords='axes fraction',fontsize=FSS-3)
-    plt.annotate(r'$\Delta$m = {:.2f} mag'.format(amp),(0.7,0.80),xycoords='axes fraction',fontsize=FSS-3)
+    plt.annotate('std = {:.2f} mag'.format(std),(0.7,0.9),xycoords='axes fraction',fontsize=FSS)
+    plt.annotate(r'$\Delta$m = {:.2f} mag'.format(amp),(0.7,0.80),xycoords='axes fraction',fontsize=FSS)
     plt.gca().invert_yaxis()
     plt.xticks(fontsize=FSS)
     plt.yticks(fontsize=FSS)
@@ -440,33 +479,6 @@ def plot_all_data(asteroid,z_filter,df,path,column='Reduced mag'):
                     height=fig_height)
     fig.data = []
 #################################################################################################################
-def plot_Hmag_curve(asteroid,z_filter,df,path,beta):
-    H_mag = df['Reduced mag']-(beta*df['Phase angle (deg)'])
-    df['H mag'] = H_mag
-    
-    # tmp_str = column.split(' ')[0]
-    fig_width = 1500
-    fig_height = 500
-    
-    fig=px.scatter(df,
-                   x='Date_corrected (JD)',
-                   y='H mag',
-                   error_y='Calibrated mag error (mag)',
-                   color='separation (mas)') 
-        
-    fig.update_layout(title={'text': str(asteroid)+' - '+z_filter+' filter - all - '+str(len(df))+' points - mag_err: '+str(round(np.median(df['Calibrated mag error (mag)']),2)),
-                                 'y':0.95,'x':0.5},
-                         font=dict(
-                                family="serif",
-                                size=30,
-                                color="Black"
-                            ))
-    fig.update_yaxes(automargin=True,autorange="reversed")
-    fig.write_image(path+asteroid+'_'+z_filter+'_all_general_H_mag.jpg',
-                    width=fig_width,
-                    height=fig_height)
-    fig.data = []   
-#################################################################################################################
 def plot_phase_curve_linear(asteroid,z_filter,path,df_list,x_list,y_list):
     '''
     This function creates the plot of the phase curve and fits a linear function to them.
@@ -493,8 +505,8 @@ def plot_phase_curve_linear(asteroid,z_filter,path,df_list,x_list,y_list):
     -------
     It saves a phase curve plot into the provided path.
     '''
-    FSS = 20
-    fig_width=8
+    FSS = 18
+    fig_width=12
     fig_height=4
     
     #
@@ -503,8 +515,8 @@ def plot_phase_curve_linear(asteroid,z_filter,path,df_list,x_list,y_list):
     #
     H,H_err,beta,beta_err = linear_absolute_mag_fit(df_list[0],x_list[0],y_list[0])
     model1 = beta*x_list[0] + H
-    text_to_anotate_1 = r'$\beta_1$:   {:.3f} +/- {:.3f}'.format(beta,beta_err)
-    text_to_anotate_2 = r'$H_1$:   {:.3f} +/- {:.3f}'.format(H,H_err)
+    text_to_anotate_1 = r'$\beta_1$:   {:.2f} +/- {:.2f}'.format(beta,beta_err)
+    text_to_anotate_2 = r'$H_1$:   {:.2f} +/- {:.2f}'.format(H,H_err)
     #
     fig = plt.figure(figsize=(fig_width,fig_height))
     plt.title(asteroid+' - '+z_filter+' filter - '+str(len(df_list[0]))+' points',fontsize=FSS)
@@ -514,16 +526,16 @@ def plot_phase_curve_linear(asteroid,z_filter,path,df_list,x_list,y_list):
     if len(df_list)>1:
         H2,H_err2,beta2,beta_err2 = linear_absolute_mag_fit(df_list[1],x_list[1],y_list[1])
         model2 = beta2*x_list[1] + H2
-        text_to_anotate_3 = r'$\beta_2$:   {:.3f} +/- {:.3f}'.format(beta2,beta_err2)
-        text_to_anotate_4 = r'$H_2$:   {:.3f} +/- {:.3f}'.format(H2,H_err2)
+        text_to_anotate_3 = r'$\beta_2$:   {:.2f} +/- {:.2f}'.format(beta2,beta_err2)
+        text_to_anotate_4 = r'$H_2$:   {:.2f} +/- {:.2f}'.format(H2,H_err2)
         #
         plt.plot(x_list[1], y_list[1], 'v',ms=7,color='r', label='Median (model 2)')
         plt.plot(x_list[1], model2, 'r--', lw=2)
-        plt.annotate(text_to_anotate_3,(0.55,0.15),xycoords='axes fraction',fontsize=FSS-3)
-        plt.annotate(text_to_anotate_4,(0.55,0.05),xycoords='axes fraction',fontsize=FSS-3)
+        plt.annotate(text_to_anotate_3,(0.5,0.2),xycoords='axes fraction',fontsize=FSS)
+        plt.annotate(text_to_anotate_4,(0.5,0.08),xycoords='axes fraction',fontsize=FSS)
     #
-    plt.annotate(text_to_anotate_1,(0.05,0.15),xycoords='axes fraction',fontsize=FSS-3)
-    plt.annotate(text_to_anotate_2,(0.05,0.05),xycoords='axes fraction',fontsize=FSS-3)    
+    plt.annotate(text_to_anotate_1,(0.1,0.2),xycoords='axes fraction',fontsize=FSS)
+    plt.annotate(text_to_anotate_2,(0.1,0.08),xycoords='axes fraction',fontsize=FSS)    
     plt.xlabel('Phase angle (deg)',fontsize=FSS)
     plt.ylabel('Reduced mag (mag)',fontsize=FSS)
     plt.xticks(fontsize=FSS)
@@ -567,8 +579,8 @@ def plot_phase_curve_schevchenko(asteroid,z_filter,path,df_list,x_list,y_list):
     -------
     It saves a phase curve plot into the provided path.
     '''
-    FSS = 20
-    fig_width=8
+    FSS = 18
+    fig_width=12
     fig_height=4
     
     #
@@ -577,9 +589,9 @@ def plot_phase_curve_schevchenko(asteroid,z_filter,path,df_list,x_list,y_list):
     #
     H,H_err,a,a_err,b,b_err = schevchenko_absolute_mag(df_list[0],x_list[0], y_list[0])
     model1 = H-(a/(1+x_list[0]))+(b*x_list[0])
-    text_to_anotate_1 = r'$H_1$:   {:.3f} +/- {:.3f}'.format(H,H_err)
-    text_to_anotate_2 = r'$a_1$:   {:.3f} +/- {:.3f}'.format(a,a_err)
-    text_to_anotate_3 = r'$b_1$:   {:.3f} +/- {:.3f}'.format(b,b_err)
+    text_to_anotate_1 = r'$H_1$:   {:.2f} +/- {:.2f}'.format(H,H_err)
+    text_to_anotate_2 = r'$a_1$:   {:.2f} +/- {:.2f}'.format(a,a_err)
+    text_to_anotate_3 = r'$b_1$:   {:.2f} +/- {:.2f}'.format(b,b_err)
     #
     fig = plt.figure(figsize=(fig_width,fig_height))
     plt.title(asteroid+' - '+z_filter+' filter - '+str(len(df_list[0]))+' points',fontsize=FSS)
@@ -589,19 +601,19 @@ def plot_phase_curve_schevchenko(asteroid,z_filter,path,df_list,x_list,y_list):
     if len(df_list)>1:
         H2,H_err2,a2,a_err2,b2,b_err2 = schevchenko_absolute_mag(df_list[1],x_list[1], y_list[1])
         model2 = H2-(a2/(1+x_list[1]))+(b2*x_list[1])
-        text_to_anotate_4 = r'$H_2$:   {:.3f} +/- {:.3f}'.format(H2,H_err2)
-        text_to_anotate_5 = r'$a_2$:   {:.3f} +/- {:.3f}'.format(a2,a_err2)
-        text_to_anotate_6 = r'$b_2$:   {:.3f} +/- {:.3f}'.format(b2,b_err2)
+        text_to_anotate_4 = r'$H_2$:   {:.2f} +/- {:.2f}'.format(H2,H_err2)
+        text_to_anotate_5 = r'$a_2$:   {:.2f} +/- {:.2f}'.format(a2,a_err2)
+        text_to_anotate_6 = r'$b_2$:   {:.2f} +/- {:.2f}'.format(b2,b_err2)
         #
         plt.plot(x_list[1], y_list[1], '.',ms=7,color='r', label='Median (model 2)')
         plt.plot(x_list[1], model2, 'r--', lw=2)
-        plt.annotate(text_to_anotate_4,(0.55,0.23),xycoords='axes fraction',fontsize=FSS-3)
-        plt.annotate(text_to_anotate_5,(0.55,0.13),xycoords='axes fraction',fontsize=FSS-3)
-        plt.annotate(text_to_anotate_6,(0.55,0.03),xycoords='axes fraction',fontsize=FSS-3)
+        plt.annotate(text_to_anotate_4,(0.5,0.28),xycoords='axes fraction',fontsize=FSS)
+        plt.annotate(text_to_anotate_5,(0.5,0.18),xycoords='axes fraction',fontsize=FSS)
+        plt.annotate(text_to_anotate_6,(0.5,0.08),xycoords='axes fraction',fontsize=FSS)
         #
-    plt.annotate(text_to_anotate_1,(0.05,0.23),xycoords='axes fraction',fontsize=FSS-3)
-    plt.annotate(text_to_anotate_2,(0.05,0.13),xycoords='axes fraction',fontsize=FSS-3)
-    plt.annotate(text_to_anotate_3,(0.05,0.03),xycoords='axes fraction',fontsize=FSS-3)    
+    plt.annotate(text_to_anotate_1,(0.1,0.28),xycoords='axes fraction',fontsize=FSS)
+    plt.annotate(text_to_anotate_2,(0.1,0.18),xycoords='axes fraction',fontsize=FSS)
+    plt.annotate(text_to_anotate_3,(0.1,0.08),xycoords='axes fraction',fontsize=FSS)    
     plt.xlabel('Phase angle (deg)',fontsize=FSS)
     plt.ylabel('Reduced mag (mag)',fontsize=FSS)
     plt.xticks(fontsize=FSS)
@@ -619,18 +631,15 @@ def plot_phase_curve_schevchenko(asteroid,z_filter,path,df_list,x_list,y_list):
         result = [H,H_err,a,a_err,b,b_err,H2,H_err2,a2,a_err2,b2,b_err2]
     return result
 ##########################################################
-def plot_single_year(asteroid,z_filter,df,path,beta):
-    H_mag = df['Reduced mag']-(beta*df['Phase angle (deg)'])
-    df['H mag'] = H_mag
-    
-    # tmp_str = column.split(' ')[0]
+def plot_single_year(asteroid,z_filter,df,path,column='Reduced mag'):
+    tmp_str = column.split(' ')[0]
     fig_width = 1500
     fig_height = 500
     for item in df["Year"].unique():
         DF = pd.DataFrame(df.loc[df['Year'] == item])
         fig=px.scatter(DF,
                        x='Date_corrected (JD)',
-                       y='H mag',
+                       y=column,
                        error_y='Calibrated mag error (mag)',
                        color='separation (mas)') 
         
@@ -642,7 +651,7 @@ def plot_single_year(asteroid,z_filter,df,path,beta):
                                 color="Black"
                             ))
         fig.update_yaxes(automargin=True,autorange="reversed")
-        fig.write_image(path+asteroid+'_'+z_filter+'_'+str(item)+'_general_H_mag.jpg',
+        fig.write_image(path+asteroid+'_'+z_filter+'_'+str(item)+'_general_'+tmp_str+'_mag.jpg',
                         width=fig_width,
                         height=fig_height)
         fig.data = []
