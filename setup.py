@@ -7,7 +7,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 setup(
-    name='ztf-rc',
+    name='ztfrc',
     packages=find_packages(),
     version='0.1',
     license='MIT',
