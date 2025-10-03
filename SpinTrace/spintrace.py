@@ -21,6 +21,7 @@ from scipy.optimize import curve_fit
 # Parallel processing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from tqdm import tqdm
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
@@ -899,28 +900,32 @@ class MultiPhotometryAnalysis:
         if verbose:
             getattr(self.logger, level)(message)
 
-    def _get_source_entry(self, fname):
+    def _get_source_entry(self, fname, ephemeride=False):
         meas = Measurements(fits_path=fname, colors=self.colors, color_errs=self.color_errs)
         mjd = meas.header['OBSMJD']
         eph = self.body.get_ephemeris_at(Time(mjd, format='mjd'), require_keys=['RA', 'DEC', 'alpha', 'delta', 'r', 'lighttime', 'V'])
         row = meas.select_best_source_within_vrange(eph['RA'], eph['DEC'], eph['V'], self.v_tol)
-        if not row:
-            return None
-
-        reduced_mag = row['mag_cal'] - 5 * np.log10(eph['r'] * eph['delta'])
-        return {
-            'jd_lt_corr': eph['JD_LT_corr'],
-            'ra': eph['RA'],
-            'dec': eph['DEC'],
-            'ref_mag': eph['V'],
-            'phase_angle': eph['alpha'],
-            'mag_cal': row['mag_cal'],
-            'mag_cal_err': row['mag_cal_err'],
-            'reduced_mag': reduced_mag,
-            'filter_code': row['filter_code'],
-            'separation (mas)': row['separation (mas)'],
-            'filename': os.path.basename(fname),
-        }
+        if ephemeride:
+            return eph
+        else:
+            if not row:
+                return None
+    
+            reduced_mag = row['mag_cal'] - 5 * np.log10(eph['r'] * eph['delta'])
+            return {
+                'jd_lt_corr': eph['JD_LT_corr'],
+                'ra': eph['RA'],
+                'dec': eph['DEC'],
+                'ref_mag': eph['V'],
+                'phase_angle': eph['alpha'],
+                'mag_cal': row['mag_cal'],
+                'mag_cal_err': row['mag_cal_err'],
+                'reduced_mag': reduced_mag,
+                'filter_code': row['filter_code'],
+                'separation (mas)': row['separation (mas)'],
+                'filename': os.path.basename(fname),
+            }
+        
         
     def run_analysis(self, check_close_stars=False, separation_lim=4000, verbose=False):
         """
@@ -1122,10 +1127,30 @@ class MultiPhotometryAnalysis:
         main_table.remove_rows(rows_to_remove)
         return main_table
         
+    def simulate_phase_curve(self, x_data, y_data, y_noise, n_simulations = 10000, model = 'linear'):
+        simulated_mag = np.random.normal(
+                loc=np.asarray(y_data),
+                scale=np.asarray(y_noise),
+                size=(n_simulations, len(np.asarray(x_data))),
+        )
+        if model == 'linear':
+            H = []
+            B = []
+            for y_sim in tqdm(simulated_mag):
+                slope, intercept = np.polyfit(x_data, y_sim, 1)
+                B.append(slope)
+                H.append(intercept)
+            h = np.mean(H)
+            h_err = np.std(H, ddof=1)
+            beta = np.mean(B)
+            beta_err = np.std(B, ddof=1)
+        else:
+            print('Phase function not supported in this method.')
+    
+        return h, h_err, beta, beta_err
     
     
-    
-    def fit_phase_curve(self, model='linear', filter_code='r', H=None, G=None, B=None, phase_bin=0.5, mag_col='auto',table=None):
+    def fit_phase_curve(self, model='linear', filter_code='r', H=None, B=None, A=None, phase_bin=0.5, mag_col='auto',table=None):
         """
         Fits a phase curve to the reduced or detrended magnitudes and optionally corrects the magnitudes 
         by subtracting the model from the original data. The method can apply both a model fit 
@@ -1136,12 +1161,12 @@ class MultiPhotometryAnalysis:
         -----------
         model : str, optional, default='linear'
             The type of model to use for fitting. Can be one of the following:
-            - 'linear': A linear model fit, H + G * alpha.
-            - 'shevchenko': A Shevchenko model fit, H + G * alpha + B / (1 + alpha).
+            - 'linear': A linear model fit, H + B * alpha.
+            - 'shevchenko': A Shevchenko model fit, H + B * alpha + A / (1 + alpha).
         filter_code : str, optional, default='r'
             The filter code to select data from `reduced_table`. The phase curve is fitted 
             only to data with this filter code.
-        H, G, B : float or None
+        H, B, A : float or None
             Phase curve parameters. If None, fit will optimize them.
         phase_bin: float, optional, default=0.5
             The bin size, in degrees, for the binned phase curve model.
@@ -1153,13 +1178,13 @@ class MultiPhotometryAnalysis:
         Returns:
         --------
         tuple or astropy.table.Table
-            - If H, G, and B are not provided, the function returns:
+            - If H, B, and A are not provided, the function returns:
                 - popt: Optimized parameters from the fit to the original data.
                 - fit_label: String describing the fit parameters for the original data.
                 - popt2: Optimized parameters from the fit to the binned data.
                 - fit_label_binned: String describing the fit parameters for the binned data.
             
-            - If H, G, and B are provided, the function returns:
+            - If H, B, and A are provided, the function returns:
                 - filter_data: The updated `reduced_table` for the chosen filter with a new column, 'phase_corrected_mag', 
                   that contains the magnitude corrections (original data - binned model fit).
     
@@ -1174,9 +1199,9 @@ class MultiPhotometryAnalysis:
         Notes:
         ------
         - The function first filters the `reduced_table` by the given filter code (`filter_code`).
-        - If `H`, `G`, and `B` are provided, it performs a fit **only** on the binned data, 
+        - If `H`, `B`, and `A` are provided, it performs a fit **only** on the binned data, 
           and subtracts the binned model from the original reduced magnitudes.
-        - If `H`, `G`, and `B` are not provided, the function performs fits both on the 
+        - If `H`, `B`, and `A` are not provided, the function performs fits both on the 
           original data and the binned data and returns the fit results for both.
         - The binned fit uses a median value per 0.5 degree bin of phase angle.
         """
@@ -1222,31 +1247,31 @@ class MultiPhotometryAnalysis:
         
         # Define the fitting model based on the selected type ('linear' or 'shevchenko')
         if model == 'linear':
-            def model_function(alpha, H, G):
-                return H + G * alpha
+            def model_function(alpha, H, B):
+                return H + B * alpha
         elif model == 'shevchenko':
-            def model_function(alpha, H, G, B):
-                return H + G * alpha + B / (1 + alpha)
+            def model_function(alpha, H, B, A):
+                return H + B * alpha + A / (1 + alpha)
         else:
             raise ValueError("Unsupported model type. Choose between 'linear' or 'shevchenko'.")
         
-        if H is None and G is None and B is None:
+        if H is None and B is None and A is None:
             # Fit both original and binned data
             popt, _ = curve_fit(model_function, x, y)
             model_vals = model_function(x, *popt)
-            std_oc = round(np.std(y - model_vals),2)
-            fit_label = f"Original: H = {popt[0]:.2f} ± {std_oc}, G = {popt[1]:.2f}" if model == 'linear' else f"Fit: H = {popt[0]:.2f}  ± {std_oc}, G = {popt[1]:.2f}, B = {popt[2]:.2f}"
+            # std_oc = round(np.std(y - model_vals),2)
+            fit_label = f"Original: H = {popt[0]:.2f}, beta = {popt[1]:.2f}" if model == 'linear' else f"Fit: H = {popt[0]:.2f}, beta = {popt[1]:.2f}, a = {popt[2]:.2f}"
   
             popt2, _ = curve_fit(model_function, phase_bin_centers, median_mag_per_bin)
             model_vals2 = model_function(x, *popt)
             std_oc2 = round(np.std(y - model_vals2),2)
-            fit_label_binned = f"Binned: H = {popt2[0]:.2f} ± {std_oc}, G = {popt2[1]:.2f}" if model == 'linear' else f"Bin Fit: H = {popt2[0]:.2f}  ± {std_oc}, G = {popt2[1]:.2f}, B = {popt2[2]:.2f}"
+            fit_label_binned = f"Binned: H = {popt2[0]:.2f}, beta = {popt2[1]:.2f}" if model == 'linear' else f"Bin Fit: H = {popt2[0]:.2f}, beta = {popt2[1]:.2f}, a = {popt2[2]:.2f}"
             
             return popt, fit_label, popt2, fit_label_binned
         else:
             # Use user-defined parameters and subtract model
-            popt2 = [H,G] if model == 'linear' else [H,G,B] 
-            fit_label_binned = f"Original data linear fit: H = {popt2[0]:.2f}, G = {popt2[1]:.2f}" if model == 'linear' else f"Original data shev fit: H = {popt2[0]:.2f} ± {std_oc}, G = {popt2[1]:.2f}, B = {popt2[2]:.2f}"
+            popt2 = [H,B] if model == 'linear' else [H,B,A] 
+            fit_label_binned = f"Original data linear fit: H = {popt2[0]}, beta = {popt2[1]}" if model == 'linear' else f"Original data shev fit: H = {popt2[0]}, beta = {popt2[1]}, a = {popt2[2]}"
             #####################
             # Subtract the model from the original reduced magnitude (using binned fit)
             model_mag = model_function(x, *popt2)  # Apply the binned fit to the original data
@@ -1755,286 +1780,6 @@ class Plots:
         # Filter and return the table
         return self.table[msk]
 
-    # def general(self, x_column: str = 'jd_lt_corr', y_column: str = 'reduced_mag',
-    #         table=None, filter_code=None, show_yerr=False, err_column: str = 'mag_cal_err',
-    #         show_color=False, color_column='separation (mas)', save_path=None,
-    #         ylim=None,bkg=True,bkg_data=False,width=1500, height=500,verbose=False):
-    #     """
-    #     Creates a general scatter plot with optional error bars and color coding.
-        
-    #     Parameters
-    #     ----------
-    #     x_column : str
-    #         Column to use on the x-axis.
-    #     y_column : str
-    #         Column to use on the y-axis.
-    #     table : astropy.table.Table or None
-    #         Optional external table to use instead of self.table.
-    #     filter_code : str or None
-    #         Filter code to select specific data.
-    #     show_yerr : bool
-    #         Whether to plot vertical error bars.
-    #     err_column : str
-    #         Column for y-axis errors (default: 'mag_cal_err').
-    #     show_color : bool
-    #         Whether to color-code by a data column.
-    #     color_column : str
-    #         Column used for color coding.
-    #     save_path : str or None
-    #         File path to save the figure.
-    #     ylim : list or None
-    #         Optional y-axis limits. Must be a list of two values [ymin, ymax].
-        
-    #     Returns
-    #     -------
-    #     plotly.graph_objects.Figure
-    #     """
-    #     if table is not None:
-    #         filter_data = table
-    #     else:
-    #         filter_data = self.filter_table_by('separation (mas)', 4000, '<')
-    
-    #     if filter_code is not None:
-    #         filter_data = filter_data[filter_data['filter_code'] == filter_code]
-
-    #     if not verbose:
-    #         logging.getLogger().setLevel(logging.WARNING)
-        
-    #     # Validate columns
-    #     for col, condition in [(x_column, True), (y_column, True), (err_column, show_yerr), (color_column, show_color)]:
-    #         if condition and col not in filter_data.colnames:
-    #             raise ValueError(f"Column '{col}' not found in the filtered data.")
-    
-    #     if isinstance(filter_data[x_column][0], Time):
-    #         filter_data[x_column] = filter_data[x_column].jd
-    
-    #     x = filter_data[x_column]
-    #     y = filter_data[y_column]
-    #     y_err = filter_data[err_column] if show_yerr else None
-    #     color = color_column if show_color else None
-    #     if show_color and color_column == 'separation (mas)':
-    #         labels = {'separation (mas)': 'O-C (mas)'}
-    #     else:
-    #         labels = None
-
-    #     if hasattr(filter_data, "to_pandas"):
-    #         filter_data = filter_data.to_pandas()
-    
-    #     fig = px.scatter(
-    #         filter_data,
-    #         x,
-    #         y,
-    #         color=color,
-    #         labels=labels
-    #     )
-    
-    #     if show_yerr:
-    #         fig.update_traces(error_y=dict(type='data', array=y_err, width=1, color='gray'))
-    
-    #     title_text = f"{self.ast_name} - {filter_code if filter_code else 'all'} - {len(filter_data)} points"
-    #     layout_params = {
-    #                     'title': {
-    #                         'text': title_text,
-    #                         'y': 0.93,
-    #                         'x': 0.5,
-    #                         'font': dict(family=self.fontfamily, size=self.fontsize, color="black")  # <<< fix
-    #                     },
-    #                     'font': dict(family=self.fontfamily, size=self.fontsize, color="black"),  # general font
-    #                     'xaxis': dict(
-    #                         title=dict(text=self.format_axis_title(x_column),
-    #                                    font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
-    #                         tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
-    #                     ),
-    #                     'yaxis': dict(
-    #                         title=dict(text=self.format_axis_title(y_column),
-    #                                    font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
-    #                         tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
-    #                     )
-    #                 }
-
-    #     fig.update_layout(layout_params)
-
-    #     if not bkg:
-    #         fig.update_layout(
-    #             plot_bgcolor='white',
-    #             paper_bgcolor='white',
-    #             xaxis=dict(
-    #                 showgrid=False,
-    #                 zeroline=False,
-    #                 showline=True,
-    #                 linewidth=1,
-    #                 linecolor='black',
-    #                 mirror=True,
-    #                 ticks='outside',
-    #                 tickcolor='black'
-    #             ),
-    #             yaxis=dict(
-    #                 showgrid=False,
-    #                 zeroline=False,
-    #                 showline=True,
-    #                 linewidth=1,
-    #                 linecolor='black',
-    #                 mirror=True,
-    #                 ticks='outside',
-    #                 tickcolor='black'
-    #             )
-    #         )
-
-    #     if bkg_data:
-    #         x_bkg = np.array(filter_data[x_column])
-    #         y_bkg = np.array(filter_data['reduced_mag'])
-    #         y_err_bkg = np.array(y_err) if y_err is not None else None
-        
-    #         fig.add_scatter(
-    #             x=x_bkg,
-    #             y=y_bkg,
-    #             mode='markers',
-    #             name='Previous',
-    #             marker=dict(color='lightgreen'),
-    #             error_y=dict(
-    #                 type='data',
-    #                 array=y_err_bkg,
-    #                 visible=True,
-    #                 color='lightgreen',
-    #                 width=0
-    #             ) if y_err_bkg is not None else None,
-    #             showlegend=False  # optional: hides gray points from legend
-    #         )
-
-    #         # Move gray points to bottom
-    #         fig.data = (fig.data[-1],) + fig.data[:-1]
-    
-    #     # Update y-axis limits
-    #     if ylim is not None and isinstance(ylim, list) and len(ylim) == 2:
-    #         fig.update_yaxes(range=ylim)
-    #     else:
-    #         fig.update_yaxes(automargin=True, autorange="reversed")
-    
-    #     if save_path:
-    #         fig.write_image(save_path, width=width, height=height, scale=3)
-    #         print(f"Figure saved to {save_path}")
-    
-    #     return fig
-
-
-    
-    # def general(self, x_column: str = 'jd_lt_corr', y_column: str = 'reduced_mag',
-    #             table=None, filter_code=None, show_yerr=False, err_column: str = 'mag_cal_err',
-    #             show_color=False, color_column='separation (mas)', save_path=None,
-    #             ylim=None, bkg=True, bkg_data=False, width=1500, height=500, verbose=False):
-    #     """
-    #     Creates a general scatter plot with optional error bars and color coding.
-    #     Returns plotly.graph_objects.Figure
-    #     """
-    #     import logging
-    #     import numpy as np
-    #     import plotly.express as px
-    #     from astropy.time import Time
-    
-    #     # 1) Choose source table
-    #     filter_data = table if table is not None else self.filter_table_by('separation (mas)', 4000, '<')
-    #     if filter_code is not None:
-    #         filter_data = filter_data[filter_data['filter_code'] == filter_code]
-    
-    #     if not verbose:
-    #         logging.getLogger().setLevel(logging.WARNING)
-    
-    #     # 2) Validate column presence
-    #     for col, needed in [(x_column, True), (y_column, True), (err_column, show_yerr), (color_column, show_color)]:
-    #         if needed and (col not in filter_data.colnames if hasattr(filter_data, 'colnames') else col not in filter_data.columns):
-    #             raise ValueError(f"Column '{col}' not found in the filtered data.")
-    
-    #     # 3) Convert any Time columns to float JD BEFORE pandas conversion
-    #     if hasattr(filter_data, 'colnames'):  # likely Astropy Table
-    #         if isinstance(filter_data[x_column][0], Time):
-    #             filter_data[x_column] = filter_data[x_column].jd
-    #         # convert to pandas once, and only once
-    #         if hasattr(filter_data, "to_pandas"):
-    #             filter_data = filter_data.to_pandas()
-    
-    #     # 4) From here on, treat as pandas DataFrame
-    #     # Make sure dtype is numeric for axes/error arrays
-    #     if show_yerr:
-    #         # if err column has NaNs or non-finite, replace with zeros to avoid export weirdness
-    #         err_array = np.asarray(filter_data[err_column], dtype=float)
-    #         err_array = np.where(np.isfinite(err_array), err_array, 0.0)
-    #     else:
-    #         err_array = None
-    
-    #     # Labels tweak
-    #     labels = None
-    #     if show_color and color_column == 'separation (mas)':
-    #         labels = {'separation (mas)': 'O-C (mas)'}
-    
-    #     # 5) Build the scatter using COLUMN NAMES (not arrays)
-    #     fig = px.scatter(
-    #         filter_data,
-    #         x=x_column,
-    #         y=y_column,
-    #         color=(color_column if show_color else None),
-    #         labels=labels
-    #     )
-    
-    #     if show_yerr:
-    #         fig.update_traces(error_y=dict(type='data', array=err_array, width=1, color='gray'))
-    
-    #     title_text = f"{self.ast_name} - {filter_code if filter_code else 'all'} - {len(filter_data)} points"
-    #     fig.update_layout(
-    #         title=dict(text=title_text, y=0.93, x=0.5,
-    #                    font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
-    #         font=dict(family=self.fontfamily, size=self.fontsize, color="black"),
-    #         xaxis=dict(
-    #             title=dict(text=self.format_axis_title(x_column),
-    #                        font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
-    #             tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
-    #         ),
-    #         yaxis=dict(
-    #             title=dict(text=self.format_axis_title(y_column),
-    #                        font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
-    #             tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
-    #         ),
-    #         margin=dict(l=70, r=20, t=70, b=60)  # a bit more breathing room avoids clipped exports
-    #     )
-    
-    #     # 6) Background styling
-    #     if not bkg:
-    #         fig.update_layout(
-    #             plot_bgcolor='white',
-    #             paper_bgcolor='white',
-    #             xaxis=dict(showgrid=False, zeroline=False, showline=True, linewidth=1,
-    #                        linecolor='black', mirror=True, ticks='outside', tickcolor='black'),
-    #             yaxis=dict(showgrid=False, zeroline=False, showline=True, linewidth=1,
-    #                        linecolor='black', mirror=True, ticks='outside', tickcolor='black')
-    #         )
-    
-    #     # 7) Optional gray "previous" points, added as a separate trace
-    #     if bkg_data:
-    #         fig.add_scatter(
-    #             x=filter_data[x_column],
-    #             y=filter_data['reduced_mag'],
-    #             mode='markers',
-    #             name='Previous',
-    #             marker=dict(color='lightgreen'),
-    #             error_y=(dict(type='data', array=err_array, visible=True, color='lightgreen', width=0)
-    #                      if err_array is not None else None),
-    #             showlegend=False,
-    #             cliponaxis=True  # keep markers inside axes box in static exports
-    #         )
-    #         # Make the gray points the bottom-most trace (so new selections appear above)
-    #         fig.data = (fig.data[-1],) + fig.data[:-1]
-    
-    #     # 8) Y-axis range / direction
-    #     if isinstance(ylim, list) and len(ylim) == 2:
-    #         fig.update_yaxes(range=ylim, autorange=False)
-    #     else:
-    #         fig.update_yaxes(autorange="reversed")  # magnitudes
-    
-    #     # 9) Save if requested
-    #     if save_path:
-    #         fig.write_image(save_path, width=width, height=height, scale=3)
-    #         print(f"Figure saved to {save_path}")
-    
-    #     return fig
 
     def general(self, x_column: str = 'jd_lt_corr', y_column: str = 'reduced_mag',
                 table=None, filter_code=None, show_yerr=False, err_column: str = 'mag_cal_err',
@@ -2100,21 +1845,40 @@ class Plots:
     
         # 7) Layout
         title_text = f"{self.ast_name} - {filter_code if filter_code else 'all'} - {len(filter_data)} points"
+        
+        # Choose label depending on column
+        if y_column == "phase_corrected_mag":
+            y_label = "RM (mag)"
+        elif y_column == "mag_corr_by_rot":
+            y_label = "Reduced Mag"
+        else:
+            y_label = self.format_axis_title(y_column)
+            
         fig.update_layout(
             title=dict(text=title_text, y=0.93, x=0.5,
                        font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
             font=dict(family=self.fontfamily, size=self.fontsize, color="black"),
             xaxis=dict(
                 title=dict(text=self.format_axis_title(x_column),
-                           font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
+                           font=dict(family=self.fontfamily, size=self.fontsize, color="black"),
+                           standoff=4
+                          ),
                 tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
             ),
             yaxis=dict(
-                title=dict(text=self.format_axis_title(y_column),
-                           font=dict(family=self.fontfamily, size=self.fontsize, color="black")),
+                title=dict(text=y_label,
+                           font=dict(family=self.fontfamily, size=self.fontsize, color="black"),
+                           standoff=4
+                          ),
                 tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
             ),
-            margin=dict(l=80, r=30, t=70, b=70)
+            coloraxis_colorbar=dict(
+                title=dict(
+                    font=dict(family=self.fontfamily, size=self.fontsize, color="black")
+                ),
+                tickfont=dict(family=self.fontfamily, size=self.fontsize, color="black")
+            ),
+            margin=dict(t=50)
         )
     
         # 8) Background styling
@@ -2272,7 +2036,7 @@ class Plots:
                 showlegend=label,
                 line=dict(dash='solid', color='red', width=3)
             )
-            
+                        
             fig.update_layout(
                 legend=dict(
                     x=0.05,
@@ -2473,7 +2237,7 @@ class Plots:
         fig.update_layout(
             title=title,
             xaxis_title='Rotational Phase',
-            yaxis_title='Magnitude',
+            yaxis_title='RM (mag)',
             width=900,
             height=450,
             font=dict(size=18),
@@ -2525,7 +2289,7 @@ class Plots:
         ax1.errorbar(df['Rotational phase'], df['Magnitude'], yerr=df['Magnitude_err'],
                      fmt='o', markersize=2, label='Data', alpha=0.6)
         ax1.plot(df['model_phase'], df['model_mag'], color='black', lw=2, label='Model',zorder=10)
-        ax1.set_ylabel("Magnitude",fontsize=fontsize)
+        ax1.set_ylabel("RM (mag)",fontsize=fontsize)
         ax1.invert_yaxis()
         ax1.tick_params(axis='both', labelsize=fontsize)
         ax1.legend(fontsize=fontsize)
@@ -2639,7 +2403,7 @@ class Plots:
             # Apply layout
             fig.update_layout(
                 xaxis_title="Rotational phase",
-                yaxis_title="Corrected magnitude",
+                yaxis_title="RM (mag)",
                 xaxis=xaxis_cfg,
                 yaxis=yaxis_cfg,
                 font=dict(family="serif", size=fontsize, color="black"),

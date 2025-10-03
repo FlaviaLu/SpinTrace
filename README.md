@@ -8,7 +8,7 @@ ZTF survey looks for targets up to ~21 mag, so results were tested just for such
 ## Features
 
 - 🔭 ZTF public data download and analysis for periodicity
-- 🪐 Small bodies rotational period detection
+- 🪐 Small bodies rotational period detection, absolute magnitude and slope calculations
 - 📈 Long-term photometry analysis
 
 ## Installation and usage steps
@@ -26,4 +26,4 @@ ZTF survey looks for targets up to ~21 mag, so results were tested just for such
     - Click on the search button.
     - It takes some minutes until the search is completed.
     - Once you see the table in the screen click on the save button and select CSV format. 
-- Example Jupyter notebooks are provided in the example directory for Haumea and Hektor. 
+- Example Jupyter notebooks are provided in the example directory for Haumea and Hektor targets are described in Rommel et al. 2025. 
